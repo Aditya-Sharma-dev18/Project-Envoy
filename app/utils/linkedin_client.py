@@ -1,15 +1,36 @@
+import os
 import random
 import time
+from datetime import datetime
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
+os.makedirs("logs/screenshots", exist_ok=True)
+
 class LinkedInCheckpointError(Exception):
-    """Raised when LinkedIn triggers a login wall, CAPTCHA, or account restriction."""
     pass
 
-def _get_browser_context(p, li_at_cookie: str):
-    browser = p.chromium.launch(headless=True)
+def _save_debug_screenshot(page, tag: str):
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    page.screenshot(path=f"logs/screenshots/{tag}_{ts}.png")
+
+def _first_visible(page, selectors: list[str], timeout: int = 8000):
+    for sel in selectors:
+        loc = page.locator(sel).first
+        try:
+            loc.wait_for(state="visible", timeout=timeout)
+            return loc
+        except PlaywrightTimeoutError:
+            continue
+    raise PlaywrightTimeoutError(f"None of the selectors became visible: {selectors}")
+
+def _get_browser_context(p, li_at_cookie: str, proxy_url: str | None = None):
+    launch_args = {"headless": True}
+    if proxy_url:
+        launch_args["proxy"] = {"server": proxy_url}
+
+    browser = p.chromium.launch(**launch_args)
     context = browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
         viewport={"width": 1280, "height": 800}
     )
     context.add_cookies([{
@@ -22,80 +43,76 @@ def _get_browser_context(p, li_at_cookie: str):
     }])
     return browser, context
 
-def send_message_playwright(li_at_cookie: str, profile_url: str, message_text: str) -> bool:
-    """Navigates to an alumni profile and sends a DM using human-like delays."""
+def send_message_playwright(li_at_cookie: str, profile_url: str, message_text: str, proxy_url: str | None = None) -> bool:
     with sync_playwright() as p:
-        browser, context = _get_browser_context(p, li_at_cookie)
+        browser, context = _get_browser_context(p, li_at_cookie, proxy_url)
         page = context.new_page()
         try:
             page.goto(profile_url, wait_until="domcontentloaded", timeout=30000)
             time.sleep(random.uniform(3.0, 6.0))
 
-            # Detect session expiry or security checkpoint
             if "login" in page.url or "checkpoint" in page.url:
+                _save_debug_screenshot(page, "checkpoint_send")
                 raise LinkedInCheckpointError("Session expired or checkpoint triggered.")
 
-            # Click the primary 'Message' button on the profile
-            msg_button = page.locator("button:has-text('Message')").first
-            msg_button.wait_for(state="visible", timeout=10000)
-            msg_button.click()
+            msg_btn = _first_visible(page, [
+                "button:has-text('Message')",
+                "a[href*='/messaging/compose']"
+            ])
+            msg_btn.click()
             time.sleep(random.uniform(1.5, 3.0))
 
-            # Locate the chat input box and type like a human
-            input_box = page.locator("div.msg-form__contenteditable[role='textbox']").last
-            input_box.wait_for(state="visible", timeout=10000)
+            input_box = _first_visible(page, [
+                "div.msg-form__contenteditable[role='textbox']",
+                "div[role='textbox'][aria-label*='Write a message']"
+            ])
             input_box.click()
             input_box.type(message_text, delay=random.randint(35, 85))
             time.sleep(random.uniform(1.0, 2.5))
 
-            # Click Send
-            send_btn = page.locator("button.msg-form__send-button[type='submit']").last
+            send_btn = _first_visible(page, [
+                "button.msg-form__send-button[type='submit']",
+                "button[type='submit']:has-text('Send')"
+            ])
             send_btn.click()
             time.sleep(random.uniform(2.0, 4.0))
             return True
 
         except PlaywrightTimeoutError as e:
-            raise RuntimeError(f"UI element not found (likely not a 1st-degree connection): {e}")
+            _save_debug_screenshot(page, "timeout_send")
+            raise RuntimeError(f"UI element timeout (screenshot saved): {e}")
         finally:
             browser.close()
 
-def fetch_unread_replies_playwright(li_at_cookie: str) -> list[dict]:
-    """Scrapes unread messages from LinkedIn Messaging inbox."""
+def fetch_unread_replies_playwright(li_at_cookie: str, proxy_url: str | None = None) -> list[dict]:
     unread_messages = []
     with sync_playwright() as p:
-        browser, context = _get_browser_context(p, li_at_cookie)
+        browser, context = _get_browser_context(p, li_at_cookie, proxy_url)
         page = context.new_page()
         try:
             page.goto("https://www.linkedin.com/messaging/?filter=unread", wait_until="domcontentloaded", timeout=30000)
             time.sleep(random.uniform(4.0, 7.0))
 
             if "login" in page.url or "checkpoint" in page.url:
+                _save_debug_screenshot(page, "checkpoint_poll")
                 raise LinkedInCheckpointError("Session expired or checkpoint triggered.")
 
-            # Grab all unread conversation threads in the left sidebar
             threads = page.locator("li.msg-conversation-listitem")
-            count = threads.count()
-
-            for i in range(min(count, 10)):  # Process max 10 unread threads per poll
+            for i in range(min(threads.count(), 10)):
                 threads.nth(i).click()
                 time.sleep(random.uniform(2.0, 3.5))
 
-                # Extract sender profile link from the thread header
                 profile_link_el = page.locator("a.msg-thread__link-to-profile").first
                 if profile_link_el.count() == 0:
                     continue
-                profile_href = profile_link_el.get_attribute("href") or ""
-                sender_slug = profile_href.strip("/").split("/")[-1]
+                sender_slug = (profile_link_el.get_attribute("href") or "").strip("/").split("/")[-1]
 
-                # Extract the latest message bubble text
                 msg_bubbles = page.locator("p.msg-s-event-listitem__body")
                 if msg_bubbles.count() > 0:
-                    latest_text = msg_bubbles.last.inner_text().strip()
                     unread_messages.append({
                         "sender_id": sender_slug,
-                        "text": latest_text
+                        "text": msg_bubbles.last.inner_text().strip()
                     })
-
             return unread_messages
         finally:
             browser.close()

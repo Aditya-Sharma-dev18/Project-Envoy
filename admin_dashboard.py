@@ -7,6 +7,20 @@ from dotenv import load_dotenv
 load_dotenv()
 
 st.set_page_config(page_title="Envoy Admin | HITL Review", layout="wide")
+def check_password():
+    if st.session_state.get("authenticated"):
+        return True
+    pwd = st.text_input("Admin Password", type="password")
+    if st.button("Login"):
+        if pwd == os.getenv("ADMIN_PASSWORD"):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("Invalid password")
+    return False
+
+if not check_password():
+    st.stop()
 st.title("🏛️ Project Envoy - Human Review Queue")
 
 # Initialize database connection
