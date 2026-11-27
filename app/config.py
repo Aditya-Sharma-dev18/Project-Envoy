@@ -7,7 +7,7 @@ class Settings(BaseSettings):
     REDIS_URL: str
 
     # LLM Parser
-    OPENAI_API_KEY: str
+    GROQ_API_KEY: str
 
     # Security & Admin UI
     COOKIE_ENCRYPTION_KEY: str
