@@ -1,18 +1,20 @@
 import instructor
-from openai import AsyncOpenAI
+from openai import OpenAI
 from app.schemas import ExtractedProfile
 from app.config import settings
 
-# Point the OpenAI client to Groq's OpenAI-compatible endpoint
+# Point the OpenAI-compatible client to Groq's endpoint (synchronous)
 client = instructor.from_openai(
-    AsyncOpenAI(
+    OpenAI(
         api_key=settings.GROQ_API_KEY,
         base_url="https://api.groq.com/openai/v1",
     ),
     mode=instructor.Mode.JSON,
 )
 
-async def parse_alumni_reply(reply_text: str) -> ExtractedProfile:
+
+def parse_alumni_reply(reply_text: str) -> ExtractedProfile:
+    """Extracts structured profile data from a casual alumni reply using an LLM."""
     system_prompt = (
         "You are an automated university data extraction agent. "
         "Extract the current job title, company, and location from the alumni's casual chat response. "
@@ -20,8 +22,8 @@ async def parse_alumni_reply(reply_text: str) -> ExtractedProfile:
         "mark the fields as null and lower your confidence score."
     )
 
-    return await client.chat.completions.create(
-        model="openai/gpt-oss-120b",
+    return client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
         response_model=ExtractedProfile,
         temperature=0.01,
         messages=[

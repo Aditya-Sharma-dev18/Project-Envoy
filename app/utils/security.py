@@ -1,30 +1,41 @@
 import re
-from fastapi import HTTPException
+from loguru import logger
 
-# Common keywords used in prompt injection attacks
+
+class PromptInjectionError(Exception):
+    """Raised when inbound text is flagged as a potential prompt injection."""
+    pass
+
+
+# Patterns commonly used in prompt injection attacks
 INJECTION_PATTERNS = [
-    r"ignore previous",
-    r"disregard instructions",
-    r"system prompt",
-    r"output the following",
-    r"bypass",
-    r"drop table"
+    r"ignore\s+(all\s+)?previous",
+    r"disregard\s+(all\s+)?(your\s+)?instructions",
+    r"(?:reveal|show|output|print)\s+(?:the\s+)?system\s*prompt",
+    r"you\s+are\s+now\s+(?:a|an)\s+",
+    r"act\s+as\s+(?:a|an)\s+(?:different|new)",
+    r"(?:new|override|replace)\s+(?:your\s+)?instructions",
+    r"<\s*(?:script|img|iframe)",
+    r";\s*(?:DROP|DELETE|UPDATE|INSERT|ALTER)\s",
 ]
+
+_compiled_patterns = [re.compile(p, re.IGNORECASE) for p in INJECTION_PATTERNS]
+
 
 def scan_inbound_text(text: str) -> bool:
     """
-    Scans the inbound message for basic prompt injection attempts.
-    Raises an HTTP exception if malicious intent is detected.
+    Scans inbound text for prompt injection attempts.
+    Raises PromptInjectionError if malicious intent is detected.
+    Returns True if the text passes all checks.
     """
-    normalized_text = text.lower()
-    
-    for pattern in INJECTION_PATTERNS:
-        if re.search(pattern, normalized_text):
-            # We silently drop the request by raising a 400 error
-            # In production, you might want to log this to an admin Slack channel
-            raise HTTPException(
-                status_code=400, 
-                detail="Message flagged by security policies."
+    for pattern in _compiled_patterns:
+        if pattern.search(text):
+            logger.warning(
+                f"Prompt injection blocked | pattern='{pattern.pattern}' | "
+                f"text_preview='{text[:100]}...'"
             )
-            
+            raise PromptInjectionError(
+                f"Inbound text flagged by security scan (pattern: {pattern.pattern})"
+            )
+
     return True
