@@ -161,7 +161,7 @@ def send_message_playwright(
             ], timeout=5000)
 
             if msg_btn:
-                msg_btn.click()
+                msg_btn.click(force=True)
                 time.sleep(random.uniform(1.5, 3.0))
 
                 input_box = _first_visible(page, [

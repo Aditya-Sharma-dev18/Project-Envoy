@@ -23,7 +23,7 @@ def parse_alumni_reply(reply_text: str) -> ExtractedProfile:
     )
 
     return client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model="openai/gpt-oss-120b",
         response_model=ExtractedProfile,
         temperature=0.01,
         messages=[

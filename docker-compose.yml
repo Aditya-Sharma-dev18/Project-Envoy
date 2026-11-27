@@ -23,7 +23,6 @@ services:
     image: redis:7-alpine
     container_name: envoy_redis
     restart: always
-    command: redis-server --requirepass changeme
     expose:
       - "6379"
     healthcheck:
