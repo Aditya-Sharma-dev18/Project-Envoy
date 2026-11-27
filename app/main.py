@@ -1,87 +1,64 @@
-from contextlib import asynccontextmanager
-from fastapi import FastAPI, BackgroundTasks, status
-import asyncpg
+from fastapi import FastAPI, Header, HTTPException, status
+from app.config import settings
+from app.sync_db import get_sync_db
+from app.tasks import schedule_stale_alumni_outreach, poll_linkedin_inboxes
 
-from app.database import db
-from app.schemas import UnipileWebhookPayload
-from app.utils.security import scan_inbound_text
-from app.utils.llm_parser import parse_alumni_reply
-
-# ---------------------------------------------------------
-# Lifespan Event: Manages DB pool startup and shutdown
-# ---------------------------------------------------------
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Start the async database pool when the server boots
-    await db.connect()
-    yield
-    # Safely close database connections when the server shuts down
-    await db.disconnect()
-
-app = FastAPI(title="Project Envoy - Webhook Listener", lifespan=lifespan)
+app = FastAPI(title="Project Envoy - Control API")
 
 
-# ---------------------------------------------------------
-# Background Worker: Handles AI extraction and DB writes
-# ---------------------------------------------------------
-async def process_inbound_message(payload: UnipileWebhookPayload):
-    """
-    Runs in the background. Calls the LLM to parse the text, 
-    then updates the PostgreSQL database safely based on confidence.
-    """
+def _verify_admin(x_admin_password: str = Header(...)):
+    if x_admin_password != settings.ADMIN_PASSWORD:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid admin password",
+        )
+
+
+@app.get("/health")
+def health_check():
+    """Verifies API and PostgreSQL connectivity."""
     try:
-        # 1. Parse the messy text into clean JSON using the LLM
-        extracted_data = await parse_alumni_reply(payload.text)
-        
-        # 2. Acquire a database connection from the pool
-        async with db.pool.acquire() as conn:
-            # 3. Production Gating: High confidence = Auto-commit
-            if extracted_data.confidence_score >= 0.85:
-                await conn.execute(
-                    """
-                    UPDATE alumni
-                    SET current_company = COALESCE($1, current_company),
-                        current_designation = COALESCE($2, current_designation),
-                        current_location = COALESCE($3, current_location),
-                        last_verified_at = NOW(),
-                        verification_status = 'COMPLETED',
-                        raw_reply_text = $4
-                    WHERE linkedin_url LIKE '%' || $5 || '%'
-                    """,
-                    extracted_data.current_company,
-                    extracted_data.current_designation,
-                    extracted_data.current_location,
-                    payload.text,
-                    payload.sender_id  # Matching LinkedIn ID to our DB record
-                )
-            
-            # Low confidence = Flag for human review
-            else:
-                await conn.execute(
-                    """
-                    UPDATE alumni
-                    SET verification_status = 'NEEDS_HUMAN_REVIEW',
-                        raw_reply_text = $1
-                    WHERE linkedin_url LIKE '%' || $2 || '%'
-                    """,
-                    payload.text,
-                    payload.sender_id
-                )
+        with get_sync_db() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1;")
+        return {"status": "healthy", "database": "connected"}
     except Exception as e:
-        # In production, replace this with a proper logger (e.g., Loguru)
-        print(f"Error processing webhook for sender {payload.sender_id}: {e}")
+        raise HTTPException(status_code=503, detail=f"Database error: {e}")
 
 
-# ---------------------------------------------------------
-# Webhook Endpoint: Receives data from Unipile
-# ---------------------------------------------------------
-@app.post("/webhooks/unipile", status_code=status.HTTP_202_ACCEPTED)
-async def handle_unipile_webhook(
-    payload: UnipileWebhookPayload, 
-    background_tasks: BackgroundTasks
-):
-    """
-    Receives incoming LinkedIn replies. Fast-fails malicious prompts 
-    and offloads processing to the background.
-    """
-    # 1. Security Check (
+@app.get("/stats")
+def get_pipeline_stats(x_admin_password: str = Header(...)):
+    """Returns live counts of alumni statuses and LinkedIn account pool health."""
+    _verify_admin(x_admin_password)
+    with get_sync_db() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT verification_status, COUNT(*) FROM alumni GROUP BY verification_status;"
+            )
+            alumni_stats = dict(cur.fetchall())
+
+            cur.execute(
+                "SELECT status, COUNT(*) FROM linkedin_accounts GROUP BY status;"
+            )
+            account_stats = dict(cur.fetchall())
+
+    return {
+        "alumni": alumni_stats,
+        "linkedin_accounts": account_stats,
+    }
+
+
+@app.post("/admin/trigger-outreach", status_code=status.HTTP_202_ACCEPTED)
+def trigger_outreach_now(x_admin_password: str = Header(...)):
+    """Manually triggers the nightly stale-alumni batch (useful for testing)."""
+    _verify_admin(x_admin_password)
+    task = schedule_stale_alumni_outreach.delay()
+    return {"status": "queued", "task_id": task.id}
+
+
+@app.post("/admin/trigger-poll", status_code=status.HTTP_202_ACCEPTED)
+def trigger_inbox_poll_now(x_admin_password: str = Header(...)):
+    """Manually triggers the hourly LinkedIn inbox scraper."""
+    _verify_admin(x_admin_password)
+    task = poll_linkedin_inboxes.delay()
+    return {"status": "queued", "task_id": task.id}
